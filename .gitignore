@@ -51,3 +51,6 @@ Thumbs.db
 # Core dumps
 core
 core.*
+src/experiments/signal_learning/02_signal_handler_debug
+src/experiments/signal_learning/02_signal_handler_observable
+src/experiments/signal_learning/test_sigaction_simple

@@ -13,19 +13,32 @@ set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -g -O0 -Wall -Wextra")
 add_definitions(-DDEBUG)
 
 # 第一个实验：信号基础观察
-add_executable(01_signal_basics 01_signal_basics.c)
+add_executable(01_signal_basics 01_signal_basics/src/01_signal_basics.c)
 target_include_directories(01_signal_basics PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # 第二个实验：信号处理器
-add_executable(02_signal_handler 02_signal_handler.c)
+add_executable(02_signal_handler 02_signal_handlers/src/02_signal_handler.c)
 target_include_directories(02_signal_handler PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+# 信号处理器调试版本
+add_executable(02_signal_handler_debug 02_signal_handlers/src/02_signal_handler_debug.c)
+target_include_directories(02_signal_handler_debug PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# 信号处理器可观测版本
+add_executable(02_signal_handler_observable 02_signal_handlers/src/02_signal_handler_observable.c)
+target_include_directories(02_signal_handler_observable PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# sigaction简单测试
+add_executable(test_sigaction_simple 02_signal_handlers/src/test_sigaction_simple.c)
+target_include_directories(test_sigaction_simple PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 # 信号发送工具
-add_executable(03_signal_sender 03_signal_sender.c)
+add_executable(03_signal_sender 03_signal_communication/src/03_signal_sender.c)
 target_include_directories(03_signal_sender PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # 设置输出目录
-set_target_properties(01_signal_basics 02_signal_handler 03_signal_sender
+set_target_properties(01_signal_basics 02_signal_handler 02_signal_handler_debug 
+                   02_signal_handler_observable test_sigaction_simple 03_signal_sender
     PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
