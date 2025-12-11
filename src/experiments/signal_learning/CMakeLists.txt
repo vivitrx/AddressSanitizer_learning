@@ -32,16 +32,16 @@ target_include_directories(02_signal_handler_observable PRIVATE ${CMAKE_CURRENT_
 add_executable(test_sigaction_simple 02_signal_handlers/src/test_sigaction_simple.c)
 target_include_directories(test_sigaction_simple PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
-# 信号发送工具
-add_executable(03_signal_sender 03_signal_communication/src/03_signal_sender.c)
-target_include_directories(03_signal_sender PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# 第三个实验：信号信息提取器
+add_executable(03_signal_info_extractor 03_signal_communication/src/03_signal_info_extractor.c)
+target_include_directories(03_signal_info_extractor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # 设置输出目录
 set_target_properties(01_signal_basics 02_signal_handler 02_signal_handler_debug 
-                   02_signal_handler_observable test_sigaction_simple 03_signal_sender
+                   02_signal_handler_observable test_sigaction_simple 03_signal_info_extractor
     PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
-)
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 # TODO: 后续实验
 # add_executable(04_siginfo_demo 04_siginfo_demo.c)
