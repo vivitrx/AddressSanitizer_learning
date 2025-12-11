@@ -51,6 +51,22 @@ Thumbs.db
 # Core dumps
 core
 core.*
+
+# Signal learning experiment binaries
 src/experiments/signal_learning/02_signal_handler_debug
 src/experiments/signal_learning/02_signal_handler_observable
 src/experiments/signal_learning/test_sigaction_simple
+
+# Buffer overflow learning experiment binaries
+src/experiments/buffer_overflow_learning/build/
+src/experiments/buffer_overflow_learning/01_basic_stack_overflow
+src/experiments/buffer_overflow_learning/02_return_address_overflow
+src/experiments/buffer_overflow_learning/03_direct_stack_overflow
+src/experiments/buffer_overflow_learning/04_successful_attack
+src/experiments/buffer_overflow_learning/05_stack_protection_demo
+src/experiments/buffer_overflow_learning/01_basic_heap_overflow
+src/experiments/buffer_overflow_learning/02_metadata_corruption
+src/experiments/buffer_overflow_learning/01_function_pointer_hijack
+src/experiments/buffer_overflow_learning/execute_attack
+src/experiments/buffer_overflow_learning/working_attack
+src/experiments/buffer_overflow_learning/final_attack
