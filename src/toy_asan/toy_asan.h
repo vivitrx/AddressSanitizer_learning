@@ -28,6 +28,8 @@
 
 // 常量定义
 #define MAX_ALLOCATIONS 1000
+#define MAX_ALLOC_BACKTRACE 8
+#define MAX_BACKTRACE_FRAMES 16
 
 // 分配记录结构
 struct allocation_record {
@@ -37,6 +39,10 @@ struct allocation_record {
     void *left_guard;             // 左保护页地址
     void *right_guard;            // 右保护页地址
     bool in_use;                 // 是否使用中
+    
+    // 新增字段：调用栈记录
+    void *alloc_backtrace[MAX_ALLOC_BACKTRACE];     // 分配时调用栈
+    int alloc_backtrace_size;                      // 调用栈大小
 };
 
 // 全局变量声明
@@ -73,5 +79,12 @@ size_t get_system_page_size(void);
 
 // 错误报告函数
 void report_buffer_overflow(void *fault_addr, struct allocation_record *rec, bool is_left_guard);
+
+// 新增函数声明
+void print_call_stack(void);
+void print_memory_relation(void *fault_addr, struct allocation_record *rec);
+void print_allocation_location(struct allocation_record *rec);
+const char *infer_access_type(int si_code);
+void forward_to_default_handler(int sig, siginfo_t *info);
 
 #endif // TOY_ASAN_H
