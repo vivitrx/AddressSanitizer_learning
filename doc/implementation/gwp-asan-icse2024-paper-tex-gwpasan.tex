@@ -1,0 +1,231 @@
+\section{GWP-ASan 算法}
+\label{sec:algo}
+
+本节描述了 GWP-ASan 算法的基本设计。鉴于 \S 中讨论的所有实现都是使用 C 或 C++ 语言实现的，本节中的代码片段展示了简化的 C 语言代码片段。对于我们的实现描述，我们假设一个兼容 POSIX 的操作系统。
+
+我们在列表~\ref{lst:original} 中定义了堆分配器的原始伪实现；堆分配原始算法的详细信息（位于 \inlcode{Allocate()} 中）和堆释放的详细信息（位于 \inlcode{Deallocate()} 中）可以视为此处描述的简单算法的黑盒。
+
+%\vspace{-1em}
+\begin{lstlisting}[language=C, frame=single, xleftmargin=3em,
+  xrightmargin=3em, caption=未修改的堆分配算法, label=lst:original]
+  void *malloc(size_t size) {
+    return Allocate(size);
+  }
+
+  void free(void *ptr) {
+    Deallocate(ptr);
+  }
+\end{lstlisting}
+
+为了实现抽样堆错误检测，需要进行如列表~\ref{lst:sampling} 所示的更改。
+
+\begin{lstlisting}[language=C, frame=single, xleftmargin=3em,
+  xrightmargin=3em, caption=带有抽样错误检测的堆分配算法, label=lst:sampling, escapechar=@]
+  void *malloc(size_t size) {
+@@   if (WantToSample(size))
+@@     return GuardAlloc(size);
+    return Allocate(size);
+  }
+
+  void free(void *ptr) {
+@@   if (IsGuarded(ptr)) {
+@@     GuardDealloc(ptr);
+@@     return;
+@@   }
+    Deallocate(ptr);
+  }
+\end{lstlisting}
+
+\inlcode{WantToSample()} 很少返回 true。\inlcode{GuardAlloc()} 分配内存，\inlcode{GuardDealloc()} 释放内存，类似于 Electric Fence。如果参数是指向先前由 \inlcode{GuardAlloc()} 返回的指针，\inlcode{IsGuarded()} 返回 true。不同实现之间的细节有所不同，其中一些如下所述。
+
+\subsection{简单版本}
+
+在本节中，我们描述了一个非常简单但功能完整的 GWP-ASan 实现。
+
+\runinsec{初始化。} 在进程启动时，GWP-ASan 池使用 \inlcode{mmap()} 分配为固定大小的虚拟内存区域，包含 \(N\) 个页面大小的分配槽和 \(N+1\) 个页面大小的保护页，使得两端的保护页包围每个槽。图~\ref{fig:initial} 说明了 GWP-ASan 池的初始内存状态。最初，所有这些内存都被标记为不可访问（使用 \inlcode{PROT\_NONE}）。红色区域在整个程序执行期间保持不可访问。
+
+\begin{lstlisting}[language=C++, frame=single, xleftmargin=0.5em,
+  xrightmargin=0.5em, caption=\inlcode{WantToSample()} 的基本实现, label=lst:want_to_sample]
+// 返回范围在 [1 ... sample_rate * 2] 内的随机数
+int RandSkip();
+
+// 在线程启动时初始化为非零随机数
+static thread_local int skip = RandSkip();
+
+bool WantToSample() {
+  if (--skip> 0) return false;
+  skip = RandSkip();
+  return true;
+}
+\end{lstlisting}
+
+\runinsec{抽样分配。} 列表~\ref{lst:want_to_sample} 展示了 \inlcode{WantToSample()} 的一个可能实现。使用线程局部分配\emph{跳过}计数器来决定跳过哪些分配的抽样（常见情况）和对哪些分配进行抽样。计数器初始化为范围 \([1 \ldots \inlcode{sample\_rate} * 2]\) 内的随机数，因此中位数为 \inlcode{sample\_rate}。然后每个未抽样的分配将跳过计数器减一。当数字达到零时，我们尝试通过 GWP-ASan 为 \inlcode{malloc()} 提供服务，并生成新的随机数。因此，在常见情况下，\inlcode{WantToSample()} 只是一个线程局部递减和条件分支。
+
+\runinsec{保护分配。} \inlcode{GuardAlloc()} 检查是否有可用的分配槽，选择一个，使其可访问（使用 \inlcode{PROT\_READ|PROT\_WRITE}），并返回给调用者。图~\ref{fig:alloc} 说明了分配后池的内存状态。
+
+通过这种方式，缓冲区下溢（在分配地址下方最多一页的访问）将始终被检测到，但溢出（在分配区域结束之后的访问）只有在访问跨越页面边界时才会被检测到。为了检测溢出，分配的区
+域需要与页面边界右对齐。实现可以随机选择左对齐或右对齐。
+
+\runinsec{抽样分配的去分配。} \inlcode{GuardDealloc()} 将分配槽标记为不可访问（使用 \inlcode{PROT\_NONE}）。为了使堆使用后释放错误能够以高概率被检测到，此分配槽需要在一段时间内保持未分配状态。\inlcode{IsGuarded()} 可以实现为范围检查。
+
+\runinsec{局限性。} 这个简单实现的明显局限性是：
+\begin{enumerate}
+
+  \item 只能保护最多 1 页的分配。
+
+  \item 最多只能同时保护 个分配。对于足够大的 ，这不再是一个重要的限制，因为我们希望避免超过特定数量的受保护分配，以避免高开销。
+
+\end{enumerate}
+
+\DeclareRobustCommand{\redzone}{%
+  \raisebox{-1pt}{\tikz \path [draw=gray,pattern={crosshatch}, pattern color=red] (0,0) rectangle (0.4,0.2);}
+}
+\DeclareRobustCommand{\unalloc}{%
+  \raisebox{-1pt}{\tikz \path [draw=gray,fill=black] (0,0) rectangle (0.4,0.2);}
+}
+\DeclareRobustCommand{\alloc}{%
+  \raisebox{-1pt}{\tikz \path [draw=gray,pattern={dots}, pattern color=green] (0,0) rectangle (0.4,0.2);}
+}
+\begin{figure}
+  \begin{tikzpicture}
+    \path [draw=gray,pattern={crosshatch}, pattern color=red] (0,0) rectangle (1,0.6);
+    \path [draw=gray,fill=black] (1,0) rectangle (2,0.6);
+    \path [draw=gray,pattern={crosshatch}, pattern color=red] (2,0) rectangle (3,0.6);
+    \path [draw=gray,fill=black] (3,0) rectangle (4,0.6);
+    \path [draw=gray,pattern={crosshatch}, pattern color=red] (4,0) rectangle (5,0.6);
+    \path [draw=gray,fill=black] (5,0) rectangle (6,0.6);
+    \path [draw=gray,pattern={crosshatch}, pattern color=red] (6,0) rectangle (7,0.6);
+  \end{tikzpicture}
+  \caption{GWP-ASan 池的初始内存状态。保护页，即``红色区域''，显示为 \redzone（红色网格图案），并始终保持不可访问。分配槽在不可访问时显示为 \unalloc（黑色填充）。}
+  \label{fig:initial}
+\end{figure}
+\begin{figure}
+  \begin{tikzpicture}
+    \path [draw=gray,pattern={crosshatch}, pattern color=red] (0,0) rectangle (1,0.6);
+    \path [draw=gray,pattern={dots}, pattern color=green] (1,0) rectangle (2,0.6);
+    \path [draw=gray,pattern={crosshatch}, pattern color=red] (2,0) rectangle (3,0.6);
+    \path [draw=gray,fill=black] (3,0) rectangle (4,0.6);
+    \path [draw=gray,pattern={crosshatch}, pattern color=red] (4,0) rectangle (5,0.6);
+    \path [draw=gray,fill=black] (5,0) rectangle (6,0.6);
+    \path [draw=gray,pattern={crosshatch}, pattern color=red] (6,0) rectangle (7,0.6);
+  \end{tikzpicture}
+  \caption{分配后的 GWP-ASan 池内存状态。显示为 \alloc（绿色点状）的分配槽已被分配并处于可访问状态。}
+  \label{fig:alloc}
+\end{figure}
+
+\subsection{生成描述性错误消息}
+
+生成描述性错误消息对于 GWP-ASan 发挥最大效用至关重要，因为它是为生产环境设计的，而在生产环境中重现任何给定错误都相当具有挑战性。如果没有简单的方法来重现错误，开发人员需要详细的错误检测信息来进行调试。
+
+当内存访问命中受保护的页面时，操作系统内核会引发信号（在 POSIX 系统上为 \inlcode{SIGSEGV}）。如果此页面是 GWP-ASan 保护页或已释放的分配槽，生成报告的信号处理程序可以提供附加信息，例如距离分配起始点的偏移量、释放时的堆栈跟踪（用于堆使用后释放错误）和分配时的堆栈跟踪（用于两种类型的错误）。在可能的情况下，报告应指出错误访问是读操作还是写操作。
+
+这使得 GWP-ASan 错误消息比其他典型的崩溃报告更具信息性。换句话说，GWP-ASan 能够产生与 ASan 或 HWASan 相同质量的报告。列表~\ref{lst:uafreport} 和 \ref{lst:oobreport} 展示了 GWP-ASan 报告的示例。\footnote{示例已修改以适应本文档的布局。\S 中的所有实现都显示这些示例报告的变体。}
+
+\begin{lstlisting}[frame=single, caption=GWP-ASan 使用后释放报告示例, label=lst:uafreport, basicstyle=\footnotesize]
+*** GWP-ASan 检测到内存错误 ***
+线程 31027 在地址 0x7feccab26008 处发生使用后释放写入：
+  #1 ./test(foo+0x45) [0x55585c0afa55]
+  #2 ./test(main+0x9f) [0x55585c0af7cf]
+
+此访问位于地址 0x7feccab26000 处的 41 字节分配内
+
+地址 0x7feccab26000 被线程 31027 释放：
+  #1 ./test(main+0x83) [0x55585c0af7b3]
+
+地址 0x7feccab26000 被线程 31027 分配：
+  #1 ./test(main+0x57) [0x55585c0af787]
+*** GWP-ASan 报告结束 ***
+\end{lstlisting}
+
+\begin{lstlisting}[frame=single, caption=GWP-ASan 越界访问报告示例, label=lst:oobreport, basicstyle=\footnotesize]
+*** GWP-ASan 检测到内存错误 ***
+线程 31027 在地址 0x7feccab25ffe 处发生越界读取：
+  #1 ./test(foo+0x45) [0x55585c0afa55]
+  #2 ./test(main+0x9f) [0x55585c0af7cf]
+
+此访问位于地址 0x7feccab26000 处的 41 字节分配左侧 2 字节处
+
+地址 0x7feccab26000 被线程 31027 分配：
+  #1 ./test(main+0x57) [0x55585c0af787]
+*** GWP-ASan 报告结束 ***
+\end{lstlisting}
+
+\section{实现}
+\label{sec:impls}
+
+本节列出了 GWP-ASan 的多种现有变体及其一些最显著的特性。
+
+\subsection{TCMalloc}
+
+TCMalloc~\cite{TCMalloc} 是 Google 服务器端代码中使用的开源 \inlcode{malloc()} 实现。它在大型多线程应用程序上为 CPU 和 RAM 效率进行了高度优化。它包含了历史上第一个 GWP-ASan 实现。
+
+TCMalloc 的 \inlcode{WantToSample()} 实现在分配器的热路径上没有引入任何新指令。这是通过利用 TCMalloc 中用于堆性能分析的现有抽样机制实现的。实际上，GWP-ASan 的抽样逻辑隐藏
+在已有的抽样逻辑后面。
+
+\inlcode{IsGuarded()} 是通过指针值的位测试实现的，因此不需要内存加载。
+
+\subsection{Google Chrome}
+\label{sec:chrome}
+
+Chrome 实现了自定义版本的 GWP-ASan，它通过 Chrome 的统一 \inlcode{malloc()} 垫片挂钩 \inlcode{malloc()}，该垫片适用于 Chrome 支持的所有平台。\footnote{作为 Chromium 项目的一部分开源：
+\url{https://chromium.googlesource.com/chromium/src/+/lkgr/docs/gwp\_asan.md}}
+每个使用 GWP-ASan 钩子的进程都需要在 \inlcode{malloc()} 中进行一次间接调用。此钩子使用上述简单的 \inlcode{WantToSample()} 实现。
+
+出于稳定性和安全性原因，Chrome 具有多进程架构，包括主浏览器进程、渲染到屏幕的 GPU 进程以及一组运行网站或标签的"渲染器"进程。GWP-ASan 在进程启动时以一定概率在每个进程中随机启用，在频繁启动的渲染器进程中启用概率较小，而在非沙盒化的安全性敏感浏览器进程中启用概率较大，后者只有一个实例存在。如果未启用，这可以避免间接调用的运行时开销，并允许 GWP-ASan 在每个启用进程中使用更多内存。如果频繁出现的错误导致许多 GWP-ASan 崩溃，这也可以防止一些用户困扰。
+
+Chrome 的 GWP-ASan 使用上述简单实现，但有一个例外：同时分配的槽的最大数量设置得远小于保留的分配槽总数（常量 \inlcode{kReservedSlots}）。这种设置延迟了每个槽的重新分配，形成了隔离区，同时限制了物理内存开销。最后，由于每个槽都与线下的内存消耗元数据（如压缩的堆栈跟踪）相关联，与元数据关联的槽总数选择为远小于 \inlcode{kReservedSlots}。如果 \inlcode{kReservedSlots} 较小，隔离区的效果会差得多。缺点是，如果 UAF 发生在已丢失其元数据的槽上，生成的错误报告将远不够详细和可操作。
+
+因为 GWP-ASan 是一个替代分配器，它必须至少提供与 Chrome 的强化分配器 PartitionAlloc 相同的安全保证。这包括在进程的生命周期内永远不会在同一个槽中分配来自不同"分区"的对象类型（以避免简单的类型混淆攻击），并且在已知存在对曾经驻留在该地址的对象的引用时永远不重用内存地址~\cite{MiraclePtr}。
+
+\subsection{Android/LLVM}
+
+\emph{compiler-rt} 项目~\cite{compiler-rt} 存在于 LLVM~\cite{LattnerA2004} 中，包含一个用于 Android 和 Scudo 强化分配器的 GWP-ASan 实现。\footnote{开源文档位于：
+\url{https://llvm.org/docs/GwpAsan.html}}
+此 GWP-ASan 实现被设计为库，可以通过 \inlcode{malloc()} 和 \inlcode{free()} 中的简单钩子与任何分配器集成。
+
+Android 自 Android 11（2020 年 9 月）起默认在其系统进程中使用 GWP-ASan，应用程序历来是选择加入。但从 Android 14 开始，应用程序将默认启用 GWP-ASan（可选择退出），但采用我们称为"可恢复"的模式。在此模式下，应用程序将收到完整的 GWP-ASan 崩溃报告，包括堆栈跟踪和错误描述，但应用程序不会被迫因段错误而崩溃。相反，系统的信号处理程序（libsigchain，在应用程序安装的任何信号处理程序之前运行）也会禁用 GWP-ASan，使故障页面可读/写，并重试故障指令。因此，使用后释放和缓冲区溢出将在重启时成功写入错误的内存位置，读取将返回零。这里的主要好处是应用程序兼容性——Android 应用程序生态系统包含大量具有内存不安全本地代码的应用程序，为了用户体验，当 Android 用户将其设备更新到 Android 14 时，此类应用程序不应被迫崩溃。
+
+一个额外的 Android 特定挑战是内存消耗。与服务器二进制文件不同，数百千字节的内存消耗在服务器环境中无关紧要，而 Android 有许多进程（约 200 个）同时运行，并且在内存受限的设备上运行。为了减少内存压力，我们应用了两种技术：
+
+\begin{enumerate}
+
+  \item \runinsec{元数据压缩。} GWP-ASan 元数据的最大部分是堆栈跟踪，GWP-ASan 的 LLVM 实现将每个堆栈帧编码为当前帧返回地址与前一个帧返回地址的 ULEB 编码差值。这使存储堆栈跟踪的内存使用量减少了 50-75\%。
+
+  \item \runinsec{进程抽样。} 我们引入另一层抽样，仅对 1/128 的进程启动启用 GWP-ASan。
+
+\end{enumerate}
+
+这两种技术，加上精心调整的小分配池（任何时间点只有 16 个分配），意味着平均设备仅使用约 140 KiB 的额外内存用于 GWP-ASan（每个抽样进程约 70 KiB）。此外，与 Chrome 一样，进程抽样可以防止同一进程频繁崩溃，这可能导致用户困扰。
+
+\subsection{Firefox}
+
+Firefox 实现了自己的自定义 GWP-ASan 版本，名为概率堆检查器（PHC）。\footnote{PHC 是开源的，位于：
+\url{https://searchfox.org/mozilla-central/source/memory/replace/phc/PHC.cpp}}
+PHC 与 Chrome 的 GWP-ASan（\S\ref{sec:chrome}）密切相关。Firefox 的内部分配器 \emph{mozjemalloc} 提供 \inlcode{malloc()} 替换支持，允许 PHC 实现拦截相应的分配器功能并单独处理 PHC 控制的分配。
+
+由于 Firefox 的分配特征与 Chrome 不同（无论是频率还是分配大小），PHC 使用略有不同的参数来决定何时以及如何抽样分配。这对于决定在进程启动时何时开始抽样尤其重要。
+
+\subsection{Apple 平台}
+
+Apple 的 GWP-ASan 变体，名为概率保护 Malloc（PGM），在标准用户空间分配器中实现。\footnote{PGM 是 Apple libmalloc 的一部分：
+\url{https://github.com/apple-oss-distributions/libmalloc/blob/main/src/pgm\_malloc.c}}
+它首先在 iOS 14.5 和 macOS 11.3（2021 年 4 月）中向客户群体部署，并逐渐扩展到其他平台，包括 watchOS 和 tvOS。PGM 为所有 Apple 拥有的用户空间进程（包括应用程序）启用，并与现有的崩溃报告管道集成。崩溃报告会增补有关受保护分配的附加信息，最显著的是分配和释放的堆栈跟踪。PGM 不适用于第三方应用程序，并且有少量进程对其部分或全部分配使用自定义内存分配器。由于这些分配由不同的分配器实现提供服务，因此它们无法从 PGM 中受益。
+
+PGM 使用保守的抽样率和固定的每进程内存预算，以确保性能不受影响。每进程内存预算为 2 MiB（macOS 为 8 MiB），并限制 PGM 的总内存占用。它计入所有保留的虚拟内存页面（保护页、分配页和隔离页）以及分配元数据。堆栈跟踪以压缩形式存储。使用\emph{进程抽样}确保设备上同时受保护的进程数量非常少。设备上受保护进程的平均数量调整到约 0.5。除了调整系统范围的开销外，进程抽样还通过避免崩溃循环来限制用户影响。
+
+\subsection{Linux 内核}
+
+Linux 内核（自 5.12 版本起）有自己的实现，名为内核 Electric-Fence（KFENCE）。\footnote{KFENCE 是主线 Linux 内核的一部分：
+\url{https://docs.kernel.org/dev-tools/kfence.html}}
+KFENCE 的实现必须与 Linux 内核的 SLAB 和 SLUB 堆分配器~\cite{SLUB} 集成，其中后者已成为 Linux 内核的推荐默认分配器。
+
+由于是在操作系统内核中实现的，KFENCE 的实现更加复杂。用户空间所依赖的几种抽象在操作系统内核环境中不可用（信号、页面保护）。相反，需要每个目标架构的支持来处理页面错误处理和页面保护。实际上，用户空间的页面保护（使用默认的 \inlcode{mprotect()}）成本相当高，特别是由于 TLB 刷新。相反，在某些架构（如 X86）上，KFENCE 实现了延迟页面保护，其中仅本地 TLB 无效，唯一的缺点是很少漏报错误。
+
+KFENCE 实现的另一个显著区别是，其抽样分配的决定是基于时间的：实现使用固定的抽样间隔（默认为 100 毫秒）和计时器来切换 SLAB 或 SLUB 分配器检查的位。内核的分配器压力完全取决于工作负载且难以预测。由于内核必须在系统的整个运行时间内服务于任意数量的不同工作负载，这些工作负载在不同的时间点甚至同时运行，因此 KFENCE 的抽样决策应独立于可能存在的病理或甚至恶意工作负载，但仍保持可预测性，以得出启用 KFENCE 时系统的可靠性能特征。基于时间的抽样策略独立于分配器压力，相对均匀，因此为内核范围内的抽样率提供了可预测的上限。
+
+当前的默认实现在分配器热路径中检查一个简单的布尔"门"，这会导致加载、比较和条件跳转：此实现已被测量在各种现实世界的生产工作负载中具有可忽略的影响。我们注意到，KFENCE 的初始版本使用了动态修补分支（自修改代码）来完全避免在热路径中检查布尔值。在某些配置中，当抽样间隔相对较大（超过 500 毫秒）时，这可能性能略好，特别是在 CPU 较少的系统（双核或四核系统）上。然而，在具有大量 CPU 的大型系统上，使用内核现有的代码修补机制（称为"静态键"~\cite{LinuxStaticKeys}）修补分支相当于获取全局系统锁，这被证明是不可接受的。
+
+\subsubsection{\textbf{优化 KFENCE 池利用率}}
+\label{sec:kfence_bloom}
+
+KFENCE 使用固定池的对象页面和相邻的保护页，这些页面在启动时设置一次。此池必须能够在系统下次重启之前为 KFENCE 分配请求提供服务。这带来的一个问题是处理长期存在的分配最终消耗整个池：我们实现了一项策略，如果新分配不太可能贡献新的\emph{覆盖率}，则拒绝新分配。我们根据分配的堆栈跟踪定义分配的\emph{覆盖率来源}。更具体地说，如果池利用率达到 75\% 或以上，KFENCE 会跳过新分配，如果存在相同覆盖率来源的现有有效分配。该实现哈希堆栈跟踪，并使用计数布隆过滤器来高效查询是否存在一个或多个相同覆盖率来源的分配。该策略确保分配的覆盖率多样性，并附带限制了频繁的长期分配（例如，文件系统缓存）。
