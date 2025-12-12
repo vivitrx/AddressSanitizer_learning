@@ -1,10 +1,10 @@
 /**
  * @file toy_malloc.c
  * @brief Toy AddressSanitizer 核心内存分配器实现
- * 
+ *
  * 本文件实现了具有保护页机制的内存分配器，通过mmap+mprotect
  * 创建[保护页][用户数据][保护页]的三页内存布局：
- * 
+ *
  * 内存布局：
  * ┌─────────────────────────────────────────────┐
  * │     保护页           │ PROT_NONE  ← 检测左溢出
@@ -13,16 +13,16 @@
  * ├─────────────────────────────────────────────┤
  * │     保护页           │ PROT_NONE  ← 检测右溢出
  * └─────────────────────────────────────────────┘
- * 
+ *
  * 主要功能：
  * - toy_malloc(): 分配带保护页的内存
  * - toy_free(): 释放整个内存块
- * 
+ *
  * 依赖：
  * - metadata.c: 分配记录管理
  * - globals.c: 全局变量和页面大小
  * - signal_handler.c: 错误检测（间接）
- * 
+ *
  * @author Toy ASan Project
  * @version 1.0
  */
@@ -32,6 +32,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <execinfo.h>  // 新增：backtrace支持
 
 /**
  * @brief 分配具有保护页的内存块
@@ -97,6 +98,17 @@ void *toy_malloc(size_t size) {
     return NULL;
   }
 
+  // 关键：记录分配时的调用栈
+  struct allocation_record *rec = find_allocation_by_user_addr(user_addr);
+  if (rec) {
+    rec->alloc_backtrace_size = backtrace(rec->alloc_backtrace, MAX_ALLOC_BACKTRACE);
+    
+    // 调试输出（可选）
+    if (rec->alloc_backtrace_size > 0) {
+      printf("DEBUG: Allocation stack recorded with %d frames\n", rec->alloc_backtrace_size);
+    }
+  }
+
   printf("toy_malloc: allocated %zu bytes at %p (base: %p)\n", size, user_addr,
          base_addr);
 
@@ -121,8 +133,8 @@ void *toy_malloc(size_t size) {
  * - 重复free同一地址是安全的（会警告但不崩溃）
  * - free(NULL)是完全安全的，符合标准库行为
  */
-void toy_free(void *ptr) {
-  if (!ptr) {
+void toy_free(void *usr_addr) {
+  if (!usr_addr) {
     return; // free(NULL)是合法的
   }
 
@@ -131,16 +143,16 @@ void toy_free(void *ptr) {
   }
 
   // 查找分配记录
-  struct allocation_record *rec = find_allocation_by_user_addr(ptr);
+  struct allocation_record *rec = find_allocation_by_user_addr(usr_addr);
   if (!rec) {
-    printf("toy_free: warning - %p not found in allocation table\n", ptr);
+    printf("toy_free: warning - %p not found in allocation table\n", usr_addr);
     return; // 不是我们分配的，不处理
   }
 
-  printf("toy_free: freeing %p (base: %p)\n", ptr, rec->base_addr);
+  printf("toy_free: freeing %p (base: %p)\n", usr_addr, rec->base_addr);
 
   // 移除分配记录
-  remove_allocation(ptr);
+  remove_allocation(usr_addr);
 
   // 释放整个内存块
   size_t ps = get_system_page_size();
