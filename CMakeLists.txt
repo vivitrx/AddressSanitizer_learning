@@ -37,6 +37,9 @@ foreach(test_source ${TEST_SOURCES})
     get_filename_component(test_name ${test_source} NAME_WE)
     add_executable(${test_name} ${test_source})
     
+    # Link with toy_asan library
+    target_link_libraries(${test_name} toy_asan)
+
     # Set output directory for tests
     set_target_properties(${test_name} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
