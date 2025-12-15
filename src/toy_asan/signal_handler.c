@@ -18,6 +18,11 @@
  * @version 1.0
  */
 
+/* 必须在所有include之前定义 */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "toy_asan.h"
 #include <signal.h>
 #include <stdio.h>
@@ -25,6 +30,7 @@
 #include <string.h>
 #include <unistd.h>      // getpid()
 #include <execinfo.h>    // backtrace, backtrace_symbols
+#include <dlfcn.h>       // dladdr
 
 /**
  * @brief 注册SIGSEGV信号处理器
@@ -131,8 +137,8 @@ void print_memory_relation(void *fault_addr, struct allocation_record *rec) {
 }
 
 /**
- * @brief 打印分配位置信息
- * @param rec 分配记录（需要扩展结构）
+ * @brief 打印分配位置信息（符号化）
+ * @param rec 分配记录
  */
 void print_allocation_location(struct allocation_record *rec) {
   // 如果有分配位置信息
@@ -140,7 +146,12 @@ void print_allocation_location(struct allocation_record *rec) {
     printf("allocated by thread T0 here:\n");
     
     for (int i = 0; i < rec->alloc_backtrace_size; i++) {
-      printf("    #%d %p\n", i, rec->alloc_backtrace[i]);
+      char symbol[512];
+      if (resolve_symbol(rec->alloc_backtrace[i], symbol, sizeof(symbol)) == 0) {
+        printf("    #%d %p in %s\n", i, rec->alloc_backtrace[i], symbol);
+      } else {
+        printf("    #%d %p in ??\n", i, rec->alloc_backtrace[i]);
+      }
     }
   }
 }
@@ -190,7 +201,7 @@ void sigsegv_handler(int sig, siginfo_t *info, void *context) {
   printf("%s of size 1 at %p thread T0\n", access_type, fault_addr);
 
   // =================== 3. 当前调用栈 ==================
-  print_call_stack();
+  print_call_stack_symbolized();
 
   printf("\n");
   
@@ -207,4 +218,205 @@ void sigsegv_handler(int sig, siginfo_t *info, void *context) {
   
   printf("=================================================================\n");
   exit(1);
+}
+
+// =================== 符号化解析实现 ===================
+
+/**
+ * @brief 获取可执行文件的基址
+ * @return 代码段的虚拟基址
+ */
+static uintptr_t get_executable_base(void) {
+    FILE *maps = fopen("/proc/self/maps", "r");
+    char line[512];
+    char executable_path[256];
+    
+    // 获取可执行文件路径
+    ssize_t len = readlink("/proc/self/exe", executable_path, sizeof(executable_path) - 1);
+    if (len == -1) {
+        fclose(maps);
+        return 0;
+    }
+    executable_path[len] = '\0';
+    
+    // 查找代码段的基址
+    while (fgets(line, sizeof(line), maps)) {
+        if (strstr(line, executable_path) && strstr(line, "r-xp")) {
+            uintptr_t base_addr;
+            if (sscanf(line, "%lx", &base_addr) == 1) {
+                fclose(maps);
+                return base_addr;
+            }
+        }
+    }
+    fclose(maps);
+    return 0;
+}
+
+/**
+ * @brief 第1级：dladdr快速解析
+ * @param addr 要解析的地址
+ * @param output 输出缓冲区
+ * @param output_size 输出缓冲区大小
+ * @return 0成功，-1失败
+ */
+static int resolve_symbol_with_dladdr(void *addr, char *output, size_t output_size) {
+    Dl_info info;
+    
+    if (dladdr(addr, &info)) {
+        if (info.dli_sname) {
+            snprintf(output, output_size, "%s", info.dli_sname);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/**
+ * @brief 解析内存映射获取load_base和file_offset
+ * @param load_base 输出：代码段加载基址
+ * @param file_offset 输出：代码段文件偏移
+ * @return 0成功，-1失败
+ */
+static int parse_memory_layout(uintptr_t *load_base, uintptr_t *file_offset) {
+    FILE *maps = fopen("/proc/self/maps", "r");
+    char line[512];
+    char executable_path[256];
+    
+    // 获取可执行文件路径
+    ssize_t len = readlink("/proc/self/exe", executable_path, sizeof(executable_path) - 1);
+    if (len == -1) {
+        fclose(maps);
+        return -1;
+    }
+    executable_path[len] = '\0';
+    
+    // 查找代码段的基址和文件偏移
+    while (fgets(line, sizeof(line), maps)) {
+        if (strstr(line, executable_path) && strstr(line, "r-xp")) {
+            uintptr_t addr_start, addr_end, offset;
+            char perms[5];
+            char dev[32];
+            char pathname[256];
+            
+            // 简化版本：只解析前4个字段
+            if (sscanf(line, "%lx-%lx %4s %lx", 
+                      &addr_start, &addr_end, perms, &offset) == 4) {
+                *load_base = addr_start;
+                *file_offset = offset;
+                fclose(maps);
+                return 0;
+            }
+        }
+    }
+    fclose(maps);
+    return -1;
+}
+
+/**
+ * @brief 第2级：addr2line精确解析
+ * @param addr 要解析的地址
+ * @param output 输出缓冲区
+ * @param output_size 输出缓冲区大小
+ * @return 0成功，-1失败
+ */
+static int resolve_symbol_with_addr2line(void *addr, char *output, size_t output_size) {
+    // 获取可执行文件路径
+    char executable_path[256];
+    ssize_t len = readlink("/proc/self/exe", executable_path, sizeof(executable_path) - 1);
+    if (len == -1) {
+        return -1;
+    }
+    executable_path[len] = '\0';
+    
+    // 解析内存布局
+    uintptr_t load_base, file_offset;
+    if (parse_memory_layout(&load_base, &file_offset) == -1) {
+        return -1;
+    }
+    
+    // 计算文件相对偏移：运行时虚拟地址 - 加载基址 + 文件偏移
+    uintptr_t file_relative_offset = (uintptr_t)addr - load_base + file_offset;
+    
+    // 构造正确命令（使用文件相对偏移）
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "addr2line -fi -e %s %lx 2>/dev/null", executable_path, file_relative_offset);
+    
+    // 执行并解析结果
+    FILE *pipe = popen(cmd, "r");
+    if (!pipe) {
+        return -1;
+    }
+    
+    char function[256] = "??";
+    char location[256] = "??";
+    
+    // 读取函数名
+    if (fgets(function, sizeof(function), pipe)) {
+        // 去除换行符
+        function[strcspn(function, "\n")] = 0;
+    }
+    
+    // 读取位置信息
+    if (fgets(location, sizeof(location), pipe)) {
+        // 去除换行符
+        location[strcspn(location, "\n")] = 0;
+    }
+    
+    pclose(pipe);
+    
+    // 格式化输出
+    if (strcmp(function, "??") != 0) {
+        if (strcmp(location, "??") != 0) {
+            snprintf(output, output_size, "%s (%s)", function, location);
+        } else {
+            snprintf(output, output_size, "%s", function);
+        }
+        return 0;
+    }
+    
+    return -1;
+}
+
+/**
+ * @brief 主符号解析函数（多级回退）
+ * @param addr 要解析的地址
+ * @param output 输出缓冲区
+ * @param output_size 输出缓冲区大小
+ * @return 0成功，-1失败
+ */
+int resolve_symbol(void *addr, char *output, size_t output_size) {
+    // // 第1级：dladdr（快速）
+    // if (resolve_symbol_with_dladdr(addr, output, output_size) == 0) {
+    //     return 0;
+    // }
+    
+    // 第2级：addr2line（准确）
+    if (resolve_symbol_with_addr2line(addr, output, output_size) == 0) {
+        return 0;
+    }
+    
+    // 第3级：fallback
+    snprintf(output, output_size, "??");
+    return -1;
+}
+
+/**
+ * @brief 符号化调用栈打印
+ */
+void print_call_stack_symbolized(void) {
+    void *buffer[MAX_BACKTRACE_FRAMES];
+    int frames = backtrace(buffer, MAX_BACKTRACE_FRAMES);
+    
+    printf("Current call stack:\n");
+    
+    // 跳过信号处理器本身
+    for (int i = 1; i < frames; i++) {
+        char symbol[512];
+        if (resolve_symbol(buffer[i], symbol, sizeof(symbol)) == 0) {
+            printf("    #%d %p in %s\n", i-1, buffer[i], symbol);
+        } else {
+            printf("    #%d %p in ??\n", i-1, buffer[i]);
+        }
+    }
 }

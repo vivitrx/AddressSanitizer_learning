@@ -82,9 +82,13 @@ void report_buffer_overflow(void *fault_addr, struct allocation_record *rec, boo
 
 // 新增函数声明
 void print_call_stack(void);
+void print_call_stack_symbolized(void);
 void print_memory_relation(void *fault_addr, struct allocation_record *rec);
 void print_allocation_location(struct allocation_record *rec);
 const char *infer_access_type(int si_code);
 void forward_to_default_handler(int sig, siginfo_t *info);
+
+// 符号解析函数声明
+int resolve_symbol(void *addr, char *output, size_t output_size);
 
 #endif // TOY_ASAN_H
