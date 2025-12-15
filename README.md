@@ -54,14 +54,31 @@ gcc -Lbuild/lib -ltoy_asan your_program.c -o your_program
 ```
 AddressSanitizer_learning/
 ├── README.md                    # 项目说明
-├── CMakeLists.txt               # CMake构建配置
-├── doc/                         # 文档
+├── doc/                         # 完整文档目录
+│   ├── README.md                # 文档导航指南
+│   ├── VS_CODE_DEBUG_GUIDE.md   # VS Code调试指南
 │   ├── learning_path.md         # 学习路径指南
 │   ├── concepts/                # 概念学习文档
 │   │   ├── 01_virtual_memory.md # 虚拟内存概念
-│   │   └── 02_mmap.md           # mmap系统调用
-│   └── implementation/          # 实现文档
-│       └── toy_ASan_build_guide.md
+│   │   ├── 02_mmap.md           # mmap系统调用
+│   │   └── 03_buffer_overflow.md # 缓冲区溢出概念
+│   ├── implementation/          # 实现文档
+│   │   ├── toy_ASan_build_guide.md # 构建指南
+│   │   ├── addr2line_symbol_resolution_workflow.md # addr2line流程
+│   │   ├── backtrace_to_error_report_workflow.md # 错误报告流程
+│   │   ├── signal_handler_implementation_guide.md # 信号处理器
+│   │   └── symbol_resolution_fix_star_method.md # 符号解析修复
+│   ├── analysis/                # 项目分析文档
+│   │   ├── ADDRESS_TRANSFORMATION_ANALYSIS.md # 地址转换分析
+│   │   └── DOCUMENTATION_CLEANUP_ANALYSIS.md # 清理分析报告
+│   ├── tools/                   # 工具和分析代码
+│   │   ├── analyze_maps.c        # 内存映射分析
+│   │   ├── debug_addr.c          # 地址调试工具
+│   │   ├── mmap_comparison.c     # mmap对比工具
+│   │   ├── test_addr2line.c      # addr2line测试
+│   │   └── test_maps_analysis.c  # 内存映射测试
+│   └── config/                  # 配置文件
+│       └── CMakeLists.txt       # 主构建配置
 ├── src/                         # 源代码
 │   ├── toy_asan/                # 玩具ASan实现
 │   │   ├── toy_malloc.c         # 内存分配器
